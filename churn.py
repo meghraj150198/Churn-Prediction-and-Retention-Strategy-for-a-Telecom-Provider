@@ -1418,6 +1418,135 @@ class FeatureEngineer:
         for feat, desc in list(self.features_created.items())[-6:]:
             print(f"  - {feat}: {desc}")
     
+    def create_plan_fit_competitor_features(self):
+        """Create plan type, plan fit score, and competitor-attractive category features"""
+        print("\n" + "=" * 80)
+        print("CREATING PLAN TYPE, PLAN FIT & COMPETITOR-ATTRACTIVE FEATURES")
+        print("=" * 80)
+        
+        # ===== PLAN TYPE SEGMENTATION =====
+        
+        # 1. Plan type flag (Postpaid assumed if not specified as Prepaid)
+        # Postpaid = contract-based, value-driven churn
+        # Prepaid = pay-as-you-go, price-driven churn
+        self.df['is_postpaid'] = (self.df['plan_type'].str.lower().str.contains('postpaid|monthly', na=False)).astype(int)
+        self.features_created['is_postpaid'] = 'Postpaid customer flag (vs prepaid)'
+        
+        # 2. Plan type category (for segmentation analysis)
+        self.df['plan_type_category'] = self.df['plan_type'].fillna('Unknown')
+        self.features_created['plan_type_category'] = 'Plan type category (Prepaid/Postpaid/Other)'
+        
+        # ===== PLAN FIT SCORE =====
+        
+        # 3. Data usage fit (actual vs expected from plan)
+        # Higher = better fit; Lower = plan too generous or customer underutilizing
+        data_mean = self.df['avg_data_gb_month'].mean()
+        data_std = self.df['avg_data_gb_month'].std()
+        # Normalized usage score (0-1): 0.5 is perfect, extremes indicate mismatch
+        self.df['data_usage_fit'] = (
+            1 - np.abs(((self.df['avg_data_gb_month'] - data_mean) / (data_std + 1)).clip(-3, 3) / 3)
+        ).clip(0, 1)
+        self.features_created['data_usage_fit'] = 'Data usage fit with plan (0-1, 0.5 optimal)'
+        
+        # 4. Voice usage fit
+        voice_mean = self.df['avg_voice_mins_month'].mean()
+        voice_std = self.df['avg_voice_mins_month'].std()
+        self.df['voice_usage_fit'] = (
+            1 - np.abs(((self.df['avg_voice_mins_month'] - voice_mean) / (voice_std + 1)).clip(-3, 3) / 3)
+        ).clip(0, 1)
+        self.features_created['voice_usage_fit'] = 'Voice usage fit with plan (0-1)'
+        
+        # 5. SMS usage fit
+        sms_mean = self.df['sms_count_month'].mean()
+        sms_std = self.df['sms_count_month'].std()
+        self.df['sms_usage_fit'] = (
+            1 - np.abs(((self.df['sms_count_month'] - sms_mean) / (sms_std + 1)).clip(-3, 3) / 3)
+        ).clip(0, 1)
+        self.features_created['sms_usage_fit'] = 'SMS usage fit with plan (0-1)'
+        
+        # 6. Composite plan fit score (weighted average)
+        # Heavy weight on data (most important), medium on voice, light on SMS
+        self.df['composite_plan_fit'] = (
+            (self.df['data_usage_fit'] * 0.5) +
+            (self.df['voice_usage_fit'] * 0.3) +
+            (self.df['sms_usage_fit'] * 0.2)
+        ).clip(0, 1)
+        self.features_created['composite_plan_fit'] = 'Composite plan fit score (0-1, 1=perfect)'
+        
+        # 7. Plan mismatch indicator (fit too low or too high)
+        # Customers with very poor fit (overages) or very good fit (underutilizing) at risk
+        self.df['plan_overfit'] = (self.df['composite_plan_fit'] < 0.3).astype(int)
+        self.features_created['plan_overfit'] = 'Poor plan fit indicator (expensive misalignment)'
+        
+        self.df['plan_underfit'] = (self.df['composite_plan_fit'] > 0.8).astype(int)
+        self.features_created['plan_underfit'] = 'Underutilization indicator (wasting plan capacity)'
+        
+        # 8. Overage propensity (normalized)
+        # High overages = plan too small
+        self.df['overage_propensity'] = (
+            self.df['overage_charges'] / (self.df['monthly_charges'] + 1)
+        ).clip(0, 2)
+        self.features_created['overage_propensity'] = 'Overage spending ratio (plan too small indicator)'
+        
+        # ===== COMPETITOR-ATTRACTIVE CATEGORIES =====
+        
+        # 9. Heavy data user indicator (likely unlimited data target)
+        # Top 25% data users = attractive to competitors
+        data_75 = self.df['avg_data_gb_month'].quantile(0.75)
+        self.df['heavy_data_user_target'] = (self.df['avg_data_gb_month'] > data_75).astype(int)
+        self.features_created['heavy_data_user_target'] = 'Heavy data user (competitor target)'
+        
+        # 10. Heavy voice user indicator (unlimited voice/calling plan target)
+        voice_75 = self.df['avg_voice_mins_month'].quantile(0.75)
+        self.df['heavy_voice_user_target'] = (self.df['avg_voice_mins_month'] > voice_75).astype(int)
+        self.features_created['heavy_voice_user_target'] = 'Heavy voice user (competitor target)'
+        
+        # 11. Power user flag (heavy in BOTH data + voice)
+        # Premium unlimited plans attractive
+        self.df['power_user_target'] = (
+            (self.df['heavy_data_user_target'] == 1) & 
+            (self.df['heavy_voice_user_target'] == 1)
+        ).astype(int)
+        self.features_created['power_user_target'] = 'Power user (unlimited plans target)'
+        
+        # 12. Unlimited plan user indicator
+        # Customers paying for unlimited services = high-value targets
+        self.df['unlimited_plan_user'] = (
+            (self.df['base_plan_category'].str.lower().str.contains('unlimited|premium', na=False)) |
+            ((self.df['is_multi_service'] == 1) & (self.df['is_family_plan'] == 1))
+        ).astype(int)
+        self.features_created['unlimited_plan_user'] = 'Unlimited plan subscriber'
+        
+        # 13. High-value competitor target (unlimited + high ARPU)
+        arpu_75 = self.df['arpu'].quantile(0.75)
+        self.df['premium_competitor_target'] = (
+            (self.df['unlimited_plan_user'] == 1) & 
+            (self.df['arpu'] > arpu_75)
+        ).astype(int)
+        self.features_created['premium_competitor_target'] = 'Premium high-value competitor target'
+        
+        # 14. Competitor attractiveness score
+        # Composite metric: high usage + high value + received offer
+        competitor_score = (
+            (self.df['heavy_data_user_target'] * 0.3) +
+            (self.df['heavy_voice_user_target'] * 0.2) +
+            ((self.df['arpu'] / self.df['arpu'].quantile(0.9)).clip(0, 1) * 0.3) +
+            (self.df['received_competitor_offer_flag'].astype(float) * 0.2)
+        )
+        self.df['competitor_attractiveness_score'] = competitor_score.clip(0, 1)
+        self.features_created['competitor_attractiveness_score'] = 'Attractiveness to competitors (0-1)'
+        
+        # 15. Competitor targeting risk (high score + received offer)
+        self.df['competitor_targeting_risk'] = (
+            (self.df['competitor_attractiveness_score'] > 0.6) & 
+            (self.df['received_competitor_offer_flag'] == 1)
+        ).astype(int)
+        self.features_created['competitor_targeting_risk'] = 'Active competitor targeting risk flag'
+        
+        print("✓ Plan type, fit & competitor-attractive features created: 15")
+        for feat, desc in list(self.features_created.items())[-15:]:
+            print(f"  - {feat}: {desc}")
+    
     def analyze_payment_churn_indicators(self):
         """Comprehensive analysis of Bill Shock, Payment Delays, and Outstanding Dues"""
         print("\n" + "=" * 80)
@@ -1764,6 +1893,7 @@ class FeatureEngineer:
         self.create_loyalty_tier_features()
         self.create_segmentation_features()
         self.create_customer_lifetime_value_features()
+        self.create_plan_fit_competitor_features()
         
         # Comprehensive payment analysis
         self.analyze_payment_churn_indicators()
@@ -1774,8 +1904,152 @@ class FeatureEngineer:
         # Complaint, resolution, and network quality analysis
         self.analyze_complaint_resolution_network()
         
+        # Plan fit and competitor analysis
+        self.analyze_plan_fit_competitor()
+        
         self.print_summary()
         return self.df
+    
+    def analyze_plan_fit_competitor(self):
+        """Comprehensive analysis of plan type, plan fit, and competitor-attractive categories"""
+        print("\n" + "=" * 80)
+        print("PLAN TYPE, PLAN FIT & COMPETITOR-ATTRACTIVE ANALYSIS")
+        print("=" * 80)
+        
+        print("\n1. PLAN TYPE SEGMENTATION - Value vs Price-Driven Churn")
+        print("-" * 80)
+        
+        postpaid_count = (self.df['is_postpaid'] == 1).sum()
+        prepaid_count = (self.df['is_postpaid'] == 0).sum()
+        
+        print(f"   Postpaid customers: {postpaid_count:,} ({postpaid_count/len(self.df)*100:.1f}%)")
+        print(f"   Prepaid customers: {prepaid_count:,} ({prepaid_count/len(self.df)*100:.1f}%)")
+        
+        if 'is_churn' in self.df.columns:
+            postpaid_churn = self.df[self.df['is_postpaid']==1]['is_churn'].mean() * 100
+            prepaid_churn = self.df[self.df['is_postpaid']==0]['is_churn'].mean() * 100
+            print(f"\n   Postpaid churn rate: {postpaid_churn:.1f}%")
+            print(f"   Prepaid churn rate: {prepaid_churn:.1f}%")
+            if postpaid_churn > 0 and prepaid_churn > 0:
+                print(f"   ⚠ Difference: {abs(postpaid_churn - prepaid_churn):.1f} percentage points")
+                print(f"   📊 Churn behavior profile:")
+                if postpaid_churn > prepaid_churn:
+                    print(f"      → Postpaid: Value-driven churn (service/quality issues)")
+                    print(f"      → Prepaid: Price-driven churn (limited plan options)")
+                else:
+                    print(f"      → Prepaid: Value-driven churn (limited usage allowance)")
+                    print(f"      → Postpaid: Price-driven churn (expensive plans)")
+        
+        print("\n2. PLAN FIT ANALYSIS - Usage Alignment")
+        print("-" * 80)
+        
+        print(f"   Average composite plan fit: {self.df['composite_plan_fit'].mean():.2f}/1.0")
+        print(f"   Median plan fit: {self.df['composite_plan_fit'].median():.2f}/1.0")
+        
+        overfit = (self.df['plan_overfit'] == 1).sum()
+        underfit = (self.df['plan_underfit'] == 1).sum()
+        
+        print(f"\n   Poor plan fit (overages/expensive): {overfit:,} ({overfit/len(self.df)*100:.1f}%)")
+        if overfit > 0 and 'is_churn' in self.df.columns:
+            overfit_churn = self.df[self.df['plan_overfit']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (poor fit): {overfit_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {overfit_churn/baseline_churn:.2f}x")
+            print(f"   💡 Opportunity: Upgrade to higher data/minutes plan")
+        
+        print(f"\n   Underutilization (wasting capacity): {underfit:,} ({underfit/len(self.df)*100:.1f}%)")
+        if underfit > 0 and 'is_churn' in self.df.columns:
+            underfit_churn = self.df[self.df['plan_underfit']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (underutilized): {underfit_churn:.1f}%")
+            print(f"   ⚠ Risk: Feeling overcharged for unused capacity")
+            print(f"   💡 Opportunity: Downsell to lower-tier plan, retain customer")
+        
+        print(f"\n   Overage propensity (high overages/month): {(self.df['overage_propensity']>0.2).sum():,}")
+        print(f"   Average overage ratio: {self.df['overage_propensity'].mean():.2f}")
+        
+        print("\n3. COMPETITOR-ATTRACTIVE CUSTOMER CATEGORIES")
+        print("-" * 80)
+        
+        heavy_data = (self.df['heavy_data_user_target'] == 1).sum()
+        heavy_voice = (self.df['heavy_voice_user_target'] == 1).sum()
+        power_user = (self.df['power_user_target'] == 1).sum()
+        unlimited = (self.df['unlimited_plan_user'] == 1).sum()
+        premium_target = (self.df['premium_competitor_target'] == 1).sum()
+        
+        print(f"   Heavy data users (top 25%): {heavy_data:,} ({heavy_data/len(self.df)*100:.1f}%)")
+        print(f"   - Target segment: Unlimited data plans")
+        if 'is_churn' in self.df.columns:
+            data_churn = self.df[self.df['heavy_data_user_target']==1]['is_churn'].mean() * 100
+            print(f"   - Churn rate: {data_churn:.1f}%")
+        
+        print(f"\n   Heavy voice users (top 25%): {heavy_voice:,} ({heavy_voice/len(self.df)*100:.1f}%)")
+        print(f"   - Target segment: Unlimited calling plans")
+        if 'is_churn' in self.df.columns:
+            voice_churn = self.df[self.df['heavy_voice_user_target']==1]['is_churn'].mean() * 100
+            print(f"   - Churn rate: {voice_churn:.1f}%")
+        
+        print(f"\n   Power users (heavy in both): {power_user:,} ({power_user/len(self.df)*100:.1f}%)")
+        print(f"   - Target segment: Premium bundled unlimited plans")
+        if 'is_churn' in self.df.columns:
+            power_churn = self.df[self.df['power_user_target']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate: {power_churn:.1f}%")
+            if power_churn > baseline_churn:
+                print(f"   ⚠ Risk multiplier: {power_churn/baseline_churn:.2f}x")
+            print(f"   💡 High-value retention target (heavy usage = high revenue)")
+        
+        print(f"\n   Unlimited plan subscribers: {unlimited:,} ({unlimited/len(self.df)*100:.1f}%)")
+        print(f"   Premium high-value targets: {premium_target:,} ({premium_target/len(self.df)*100:.1f}%)")
+        
+        print("\n4. ACTIVE COMPETITOR TARGETING - Risk Assessment")
+        print("-" * 80)
+        
+        competitor_risk = (self.df['competitor_targeting_risk'] == 1).sum()
+        received_offer = (self.df['received_competitor_offer_flag'] == 1).sum()
+        
+        print(f"   Customers receiving competitor offers: {received_offer:,} ({received_offer/len(self.df)*100:.1f}%)")
+        print(f"   High attractiveness + active offer: {competitor_risk:,} ({competitor_risk/len(self.df)*100:.1f}%)")
+        
+        if competitor_risk > 0 and 'is_churn' in self.df.columns:
+            risk_churn = self.df[self.df['competitor_targeting_risk']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (active targeting): {risk_churn:.1f}%")
+            print(f"   ⚠ Critical risk multiplier: {risk_churn/baseline_churn:.2f}x")
+            print(f"   🚨 IMMEDIATE RETENTION ACTION NEEDED")
+        
+        # High attractiveness segments
+        high_attract = (self.df['competitor_attractiveness_score'] > 0.6).sum()
+        print(f"\n   High competitor attractiveness: {high_attract:,} ({high_attract/len(self.df)*100:.1f}%)")
+        if high_attract > 0:
+            avg_attract = self.df[self.df['competitor_attractiveness_score']>0.6]['competitor_attractiveness_score'].mean()
+            print(f"   - Average attractiveness score: {avg_attract:.2f}/1.0")
+        
+        print("\n5. STRATEGIC INSIGHTS & RETENTION OPPORTUNITIES")
+        print("-" * 80)
+        
+        # Overlap analysis
+        overlap_high_use_high_value = (
+            (self.df['power_user_target'] == 1) & 
+            (self.df['arpu'] > self.df['arpu'].quantile(0.75))
+        ).sum()
+        
+        print(f"   Premium power users at risk: {overlap_high_use_high_value:,} customers")
+        if overlap_high_use_high_value > 0:
+            avg_value = self.df[
+                (self.df['power_user_target'] == 1) & 
+                (self.df['arpu'] > self.df['arpu'].quantile(0.75))
+            ]['arpu'].mean()
+            monthly_rev_at_risk = overlap_high_use_high_value * avg_value
+            print(f"   - Monthly revenue at risk: ${monthly_rev_at_risk:,.0f}")
+            print(f"   💡 Priority: Premium retention programs, exclusive offers, VIP support")
+        
+        # Plan fit opportunity
+        plan_fit_opportunity = overfit + underfit
+        print(f"\n   Plan optimization opportunity: {plan_fit_opportunity:,} customers ({plan_fit_opportunity/len(self.df)*100:.1f}%)")
+        print(f"   💡 Actions:")
+        print(f"      - Overfit (overage issues): Automatic upgrade recommendations")
+        print(f"      - Underfit (unused capacity): Downsell options, transparency builds trust")
     
     def print_summary(self):
         """Print feature engineering summary"""
@@ -1800,6 +2074,10 @@ class FeatureEngineer:
         print(f"    • Complaint frequency enhancements (4 features)")
         print(f"    • Issue resolution time analysis (4 features)")
         print(f"    • Network quality indicators (7 features)")
+        print(f"  - Plan type, fit & competitor-attractive: 15 features")
+        print(f"    • Plan type segmentation (2 features)")
+        print(f"    • Plan fit score enhancements (6 features)")
+        print(f"    • Competitor-attractive categories (7 features)")
         print(f"  - Tenure segmentation: 4 features")
         print(f"  - Service quality: 5 features")
         print(f"  - Engagement & loyalty: 5 features")
