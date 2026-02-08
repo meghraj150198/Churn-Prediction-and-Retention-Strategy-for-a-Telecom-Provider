@@ -1547,6 +1547,184 @@ class FeatureEngineer:
         for feat, desc in list(self.features_created.items())[-15:]:
             print(f"  - {feat}: {desc}")
     
+    def create_engagement_marketing_service_features(self):
+        """Create app engagement, marketing response, and service interaction depth features"""
+        print("\n" + "=" * 80)
+        print("CREATING APP/PORTAL ENGAGEMENT, MARKETING RESPONSE & SERVICE INTERACTION FEATURES")
+        print("=" * 80)
+        
+        # ===== APP/PORTAL LOGIN FREQUENCY (8 features) =====
+        # 1. App login count (direct from data)
+        self.df['app_login_count_30d'] = self.df['app_logins_30d']
+        self.features_created['app_login_count_30d'] = 'App logins in last 30 days'
+        
+        # 2. Engagement score: normalized login activity (0-1)
+        login_25 = self.df['app_login_count_30d'].quantile(0.25)
+        login_75 = self.df['app_login_count_30d'].quantile(0.75)
+        self.df['app_login_engagement_score'] = (
+            ((self.df['app_login_count_30d'] - login_25) / (login_75 - login_25 + 1)).clip(0, 1)
+        )
+        self.features_created['app_login_engagement_score'] = 'App login engagement (0-1, lower=less engaged)'
+        
+        # 3. Low engagement flag (bottom quartile)
+        self.df['low_app_engagement_flag'] = (
+            self.df['app_login_count_30d'] <= login_25
+        ).astype(int)
+        self.features_created['low_app_engagement_flag'] = 'Low app engagement indicator'
+        
+        # 4. Self-care transaction count
+        self.df['selfcare_transaction_count_30d'] = self.df['selfcare_transactions_30d']
+        self.features_created['selfcare_transaction_count_30d'] = 'Self-care transactions in last 30 days'
+        
+        # 5. Digital engagement composite: app logins + self-care (0-1)
+        selfcare_75 = self.df['selfcare_transaction_count_30d'].quantile(0.75)
+        login_component = (self.df['app_login_engagement_score'] * 0.6)
+        selfcare_component = ((self.df['selfcare_transaction_count_30d'] / (selfcare_75 + 1)).clip(0, 1) * 0.4)
+        self.df['digital_engagement_composite'] = (login_component + selfcare_component).clip(0, 1)
+        self.features_created['digital_engagement_composite'] = 'Digital engagement (app+self-care, 0-1)'
+        
+        # 6. App-self-care ratio (logins per transaction, normalized)
+        self.df['app_selfcare_ratio'] = (
+            self.df['app_login_count_30d'] / (self.df['selfcare_transaction_count_30d'] + 1)
+        )
+        self.df['app_selfcare_ratio'] = (
+            (self.df['app_selfcare_ratio'] / self.df['app_selfcare_ratio'].quantile(0.75)).clip(0, 2)
+        )
+        self.features_created['app_selfcare_ratio'] = 'Logins to self-care transaction ratio'
+        
+        # 7. Portal dependency score: reliance on digital channels vs call center
+        total_interactions = self.df['app_login_count_30d'] + self.df['selfcare_transaction_count_30d'] + self.df['call_center_interactions_3m']
+        self.df['portal_dependency_score'] = (
+            (self.df['app_login_count_30d'] + self.df['selfcare_transaction_count_30d']) / 
+            (total_interactions + 1)
+        ).clip(0, 1)
+        self.features_created['portal_dependency_score'] = 'Reliance on digital channels (0-1, portal vs call center)'
+        
+        # 8. Engagement trend risk: low engagement correlates with churn
+        self.df['engagement_trend_risk'] = (
+            (self.df['digital_engagement_composite'] < 0.33) |  # Low digital engagement
+            (self.df['app_login_count_30d'] == 0)  # No logins at all
+        ).astype(int)
+        self.features_created['engagement_trend_risk'] = 'Low engagement churn risk flag'
+        
+        # ===== RESPONSE TO MARKETING OFFERS (7 features) =====
+        # 9. Offer response indicator
+        self.df['offer_response_indicator'] = self.df['retention_offer_accepted_flag']
+        self.features_created['offer_response_indicator'] = 'Accepted retention offer (marketing responsive)'
+        
+        # 10. Marketing campaign response score (normalized)
+        # Assumes customers who accept offers are responsive, those who don't are less responsive
+        received_offers = self.df['received_competitor_offer_flag']
+        accepted_offers = self.df['retention_offer_accepted_flag']
+        self.df['marketing_campaign_response_score'] = (
+            (accepted_offers * 0.8) +
+            ((received_offers * (1 - accepted_offers)) * 0.2)  # Slight credit for engagement with offers even if rejected
+        ).clip(0, 1)
+        self.features_created['marketing_campaign_response_score'] = 'Marketing response likelihood (0-1)'
+        
+        # 11. Competitor offer ignorer: received offer but not responsive
+        self.df['competitor_offer_ignorer'] = (
+            (self.df['received_competitor_offer_flag'] == 1) &
+            (self.df['retention_offer_accepted_flag'] == 0) &
+            (self.df['marketing_campaign_response_score'] < 0.3)
+        ).astype(int)
+        self.features_created['competitor_offer_ignorer'] = 'Competitor offer ignored (non-responsive)'
+        
+        # 12. Retention offer acceptor flag
+        self.df['retention_offer_acceptor'] = self.df['retention_offer_accepted_flag']
+        self.features_created['retention_offer_acceptor'] = 'Accept retention offers (marketing responsive)'
+        
+        # 13. Offer responsive segment classification
+        self.df['offer_responsive_segment'] = 'Unresponsive'  # Default
+        self.df.loc[
+            self.df['marketing_campaign_response_score'] > 0.6, 
+            'offer_responsive_segment'
+        ] = 'Responsive'
+        self.df.loc[
+            self.df['marketing_campaign_response_score'] > 0.8, 
+            'offer_responsive_segment'
+        ] = 'Highly_Responsive'
+        self.features_created['offer_responsive_segment'] = 'Offer responsiveness category'
+        
+        # 14. Offer engagement value: composite of acceptance likelihood
+        self.df['offer_engagement_value'] = (
+            (self.df['retention_offer_acceptor'].astype(float) * 0.5) +
+            (self.df['marketing_campaign_response_score'] * 0.3) +
+            ((1 - self.df['competitor_offer_ignorer'].astype(float)) * 0.2)
+        ).clip(0, 1)
+        self.features_created['offer_engagement_value'] = 'Future offer acceptance likelihood (0-1)'
+        
+        # ===== SERVICE INTERACTION DEPTH (8 features) =====
+        # 15. Support interaction count in 3 months
+        self.df['support_interaction_count_3m'] = self.df['call_center_interactions_3m']
+        self.features_created['support_interaction_count_3m'] = 'Call center interactions in 3 months'
+        
+        # 16. Interaction frequency: normalized interaction count (0-1)
+        interaction_75 = self.df['support_interaction_count_3m'].quantile(0.75)
+        self.df['interaction_frequency_score'] = (
+            (self.df['support_interaction_count_3m'] / (interaction_75 + 1)).clip(0, 1)
+        )
+        self.features_created['interaction_frequency_score'] = 'Support interaction frequency (0-1)'
+        
+        # 17. Interaction without resolution risk: high interactions + slow resolution
+        slow_resolution_threshold = 7  # days
+        self.df['interaction_without_resolution_risk'] = (
+            (self.df['support_interaction_count_3m'] > interaction_75) &
+            (self.df['last_complaint_resolution_days'] > slow_resolution_threshold)
+        ).astype(int)
+        self.features_created['interaction_without_resolution_risk'] = 'High interaction without quick resolution'
+        
+        # 18. Complaint to interaction ratio
+        self.df['complaint_to_interaction_ratio'] = (
+            self.df['num_complaints_3m'] / (self.df['support_interaction_count_3m'] + 1)
+        ).clip(0, 1)
+        self.features_created['complaint_to_interaction_ratio'] = 'Complaints as % of interactions'
+        
+        # 19. Unresolved issue indicator: complaints with slow resolution
+        self.df['unresolved_issue_indicator'] = (
+            (self.df['num_complaints_3m'] > 0) &
+            (self.df['last_complaint_resolution_days'] > 14)  # >2 weeks = slow
+        ).astype(int)
+        self.features_created['unresolved_issue_indicator'] = 'Slow/unresolved complaint indicator'
+        
+        # 20. Support frustration score: composite of interaction patterns
+        # High interactions + complaints + slow resolution = frustrated customer
+        frustration_score = (
+            (self.df['interaction_frequency_score'] * 0.3) +
+            (self.df['complaint_to_interaction_ratio'] * 0.3) +
+            ((self.df['last_complaint_resolution_days'] / 30).clip(0, 1) * 0.2) +
+            (self.df['unresolved_issue_indicator'].astype(float) * 0.2)
+        )
+        self.df['support_frustration_score'] = frustration_score.clip(0, 1)
+        self.features_created['support_frustration_score'] = 'Support frustration level (0-1)'
+        
+        # 21. High interaction churn risk: interactions without resolution
+        self.df['high_interaction_churn_risk'] = (
+            (self.df['interaction_without_resolution_risk'] == 1) |
+            (self.df['support_frustration_score'] > 0.65)
+        ).astype(int)
+        self.features_created['high_interaction_churn_risk'] = 'High support interactions indicate churn risk'
+        
+        # 22. Support quality gap: interaction frequency vs satisfaction (NPS-based)
+        # High interactions but low NPS = quality problem
+        nps_satisfaction = ((self.df['nps_score'] + 100) / 200).clip(0, 1)  # Normalize NPS to 0-1
+        self.df['support_quality_gap'] = (
+            (self.df['interaction_frequency_score'] * 0.6) -
+            (nps_satisfaction * 0.4)
+        ).clip(0, 1)
+        self.features_created['support_quality_gap'] = 'Gap between interactions and satisfaction (0-1)'
+        
+        # 23. Engagement-service integration flag
+        self.df['engagement_service_risk_integration'] = (
+            (self.df['engagement_trend_risk'] == 1) &  # Low digital engagement + 
+            (self.df['high_interaction_churn_risk'] == 1)  # High support issues
+        ).astype(int)
+        self.features_created['engagement_service_risk_integration'] = 'Disengaged + high support issues'
+        
+        print("✓ App/portal engagement, marketing response & service interaction features created: 23")
+        for feat, desc in list(self.features_created.items())[-23:]:
+            print(f"  - {feat}: {desc}")
+    
     def analyze_payment_churn_indicators(self):
         """Comprehensive analysis of Bill Shock, Payment Delays, and Outstanding Dues"""
         print("\n" + "=" * 80)
@@ -1894,6 +2072,7 @@ class FeatureEngineer:
         self.create_segmentation_features()
         self.create_customer_lifetime_value_features()
         self.create_plan_fit_competitor_features()
+        self.create_engagement_marketing_service_features()
         
         # Comprehensive payment analysis
         self.analyze_payment_churn_indicators()
@@ -1906,6 +2085,9 @@ class FeatureEngineer:
         
         # Plan fit and competitor analysis
         self.analyze_plan_fit_competitor()
+        
+        # Engagement, marketing response, and service interaction analysis
+        self.analyze_engagement_marketing_service()
         
         self.print_summary()
         return self.df
@@ -2051,6 +2233,178 @@ class FeatureEngineer:
         print(f"      - Overfit (overage issues): Automatic upgrade recommendations")
         print(f"      - Underfit (unused capacity): Downsell options, transparency builds trust")
     
+    def analyze_engagement_marketing_service(self):
+        """Comprehensive analysis of app engagement, marketing response, and service interaction depth"""
+        print("\n" + "=" * 80)
+        print("APP/PORTAL ENGAGEMENT, MARKETING OFFER RESPONSE & SERVICE INTERACTION ANALYSIS")
+        print("=" * 80)
+        
+        print("\n1. APP/PORTAL LOGIN FREQUENCY - Digital Channel Engagement")
+        print("-" * 80)
+        avg_logins = self.df['app_login_count_30d'].mean()
+        median_logins = self.df['app_login_count_30d'].median()
+        no_logins = (self.df['app_login_count_30d'] == 0).sum()
+        low_engagement = (self.df['low_app_engagement_flag'] == 1).sum()
+        
+        print(f"   Average app logins (30 days): {avg_logins:.1f}")
+        print(f"   Median app logins: {median_logins:.0f}")
+        print(f"   Customers with NO logins: {no_logins:,} ({no_logins/len(self.df)*100:.1f}%)")
+        print(f"   Low engagement customers: {low_engagement:,} ({low_engagement/len(self.df)*100:.1f}%)")
+        
+        if 'is_churn' in self.df.columns:
+            no_login_churn = self.df[self.df['app_login_count_30d'] == 0]['is_churn'].mean() * 100
+            active_login_churn = self.df[self.df['app_login_count_30d'] > 0]['is_churn'].mean() * 100
+            overall_churn = self.df['is_churn'].mean() * 100
+            
+            print(f"   Churn rate (no logins): {no_login_churn:.1f}%")
+            print(f"   Churn rate (active logins): {active_login_churn:.1f}%")
+            print(f"   ⚠ Critical risk multiplier (no logins): {no_login_churn/overall_churn:.2f}x")
+            print(f"   🚨 INSIGHT: App disengagement = major churn signal (lack of attachment)")
+        
+        print("\n2. DIGITAL ENGAGEMENT SCORE - App + Self-Care Activity")
+        print("-" * 80)
+        avg_engagement = self.df['digital_engagement_composite'].mean()
+        high_engagement = (self.df['digital_engagement_composite'] > 0.66).sum()
+        medium_engagement = ((self.df['digital_engagement_composite'] > 0.33) & (self.df['digital_engagement_composite'] <= 0.66)).sum()
+        low_engagement_score = (self.df['digital_engagement_composite'] <= 0.33).sum()
+        
+        print(f"   Average digital engagement score: {avg_engagement:.2f}/1.0")
+        print(f"   High engagement (>0.66): {high_engagement:,} ({high_engagement/len(self.df)*100:.1f}%)")
+        print(f"   Medium engagement (0.33-0.66): {medium_engagement:,} ({medium_engagement/len(self.df)*100:.1f}%)")
+        print(f"   Low engagement (≤0.33): {low_engagement_score:,} ({low_engagement_score/len(self.df)*100:.1f}%)")
+        
+        if low_engagement_score > 0 and 'is_churn' in self.df.columns:
+            low_eng_churn = self.df[self.df['digital_engagement_composite'] <= 0.33]['is_churn'].mean() * 100
+            high_eng_churn = self.df[self.df['digital_engagement_composite'] > 0.66]['is_churn'].mean() * 100
+            print(f"   Churn rate (low engagement): {low_eng_churn:.1f}%")
+            print(f"   Churn rate (high engagement): {high_eng_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {low_eng_churn/high_eng_churn if high_eng_churn > 0 else 0:.2f}x")
+        
+        print("\n3. RESPONSE TO MARKETING OFFERS - Campaign Effectiveness")
+        print("-" * 80)
+        responsive_count = (self.df['retention_offer_acceptor'] == 1).sum()
+        highly_responsive = (self.df['marketing_campaign_response_score'] > 0.8).sum()
+        somewhat_responsive = ((self.df['marketing_campaign_response_score'] > 0.5) & (self.df['marketing_campaign_response_score'] <= 0.8)).sum()
+        offer_ignorers = (self.df['competitor_offer_ignorer'] == 1).sum()
+        
+        print(f"   Customers who accepted offers: {responsive_count:,} ({responsive_count/len(self.df)*100:.1f}%)")
+        print(f"   Highly responsive to campaigns: {highly_responsive:,} ({highly_responsive/len(self.df)*100:.1f}%)")
+        print(f"   Somewhat responsive: {somewhat_responsive:,} ({somewhat_responsive/len(self.df)*100:.1f}%)")
+        print(f"   Offer ignorers (non-responsive): {offer_ignorers:,} ({offer_ignorers/len(self.df)*100:.1f}%)")
+        
+        if responsive_count > 0 and 'is_churn' in self.df.columns:
+            responsive_churn = self.df[self.df['retention_offer_acceptor'] == 1]['is_churn'].mean() * 100
+            non_responsive_churn = self.df[self.df['retention_offer_acceptor'] == 0]['is_churn'].mean() * 100
+            overall_churn = self.df['is_churn'].mean() * 100
+            
+            print(f"   Churn rate (offer acceptors): {responsive_churn:.1f}%")
+            print(f"   Churn rate (non-acceptors): {non_responsive_churn:.1f}%")
+            print(f"   ✓ Protection factor (acceptance): {non_responsive_churn/responsive_churn:.2f}x")
+            print(f"   💡 INSIGHT: Retention offer acceptance highly effective at churn prevention")
+        
+        if offer_ignorers > 0 and 'is_churn' in self.df.columns:
+            ignorer_churn = self.df[self.df['competitor_offer_ignorer'] == 1]['is_churn'].mean() * 100
+            print(f"   Churn rate (offer ignorers): {ignorer_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier vs average: {ignorer_churn/overall_churn if overall_churn > 0 else 0:.2f}x")
+            print(f"   🚨 CRITICAL: Non-responsive customers = high churn risk")
+        
+        print("\n4. SERVICE INTERACTION DEPTH - Support Quality & Resolution")
+        print("-" * 80)
+        avg_interactions = self.df['support_interaction_count_3m'].mean()
+        high_interaction = (self.df['support_interaction_count_3m'] > self.df['support_interaction_count_3m'].quantile(0.75)).sum()
+        unresolved_issues = (self.df['unresolved_issue_indicator'] == 1).sum()
+        interaction_without_resolution = (self.df['interaction_without_resolution_risk'] == 1).sum()
+        
+        print(f"   Average support interactions (3m): {avg_interactions:.1f}")
+        print(f"   High interaction customers: {high_interaction:,} ({high_interaction/len(self.df)*100:.1f}%)")
+        print(f"   Customers with unresolved issues: {unresolved_issues:,} ({unresolved_issues/len(self.df)*100:.1f}%)")
+        print(f"   High interactions without quick resolution: {interaction_without_resolution:,} ({interaction_without_resolution/len(self.df)*100:.1f}%)")
+        
+        avg_resolution_days = self.df['last_complaint_resolution_days'].mean()
+        median_resolution_days = self.df['last_complaint_resolution_days'].median()
+        print(f"   Average resolution time: {avg_resolution_days:.1f} days")
+        print(f"   Median resolution time: {median_resolution_days:.0f} days")
+        
+        if interaction_without_resolution > 0 and 'is_churn' in self.df.columns:
+            unresolved_churn = self.df[
+                self.df['interaction_without_resolution_risk'] == 1
+            ]['is_churn'].mean() * 100
+            resolved_churn = self.df[
+                self.df['interaction_without_resolution_risk'] == 0
+            ]['is_churn'].mean() * 100
+            overall_churn = self.df['is_churn'].mean() * 100
+            
+            print(f"   Churn rate (unresolved interactions): {unresolved_churn:.1f}%")
+            print(f"   Churn rate (resolved interactions): {resolved_churn:.1f}%")
+            print(f"   ⚠ CRITICAL risk multiplier: {unresolved_churn/resolved_churn if resolved_churn > 0 else 0:.2f}x")
+            print(f"   🚨 INSIGHT: Unresolved issues drive customer frustration and churn")
+        
+        print("\n5. INTEGRATED ENGAGEMENT-SERVICE-MARKETING RISK PROFILE")
+        print("-" * 80)
+        engagement_risk = (self.df['engagement_trend_risk'] == 1).sum()
+        service_risk = (self.df['high_interaction_churn_risk'] == 1).sum()
+        combined_risk = (self.df['engagement_service_risk_integration'] == 1).sum()
+        
+        print(f"   Low digital engagement risk: {engagement_risk:,} ({engagement_risk/len(self.df)*100:.1f}%)")
+        print(f"   High service interaction risk: {service_risk:,} ({service_risk/len(self.df)*100:.1f}%)")
+        print(f"   Combined engagement + service risk: {combined_risk:,} ({combined_risk/len(self.df)*100:.1f}%)")
+        
+        if combined_risk > 0 and 'is_churn' in self.df.columns:
+            combined_churn = self.df[
+                self.df['engagement_service_risk_integration'] == 1
+            ]['is_churn'].mean() * 100
+            no_risk_churn = self.df[
+                self.df['engagement_service_risk_integration'] == 0
+            ]['is_churn'].mean() * 100
+            
+            print(f"   Churn rate (combined risk): {combined_churn:.1f}%")
+            print(f"   Churn rate (no combined risk): {no_risk_churn:.1f}%")
+            print(f"   ⚠ CRITICAL risk multiplier: {combined_churn/no_risk_churn if no_risk_churn > 0 else 0:.2f}x")
+            print(f"   🚨 Triple threat: Disengaged + unresponsive to offers + support problems")
+        
+        # Support frustration analysis
+        avg_frustration = self.df['support_frustration_score'].mean()
+        high_frustration = (self.df['support_frustration_score'] > 0.65).sum()
+        
+        print(f"\n   Average support frustration score: {avg_frustration:.2f}/1.0")
+        print(f"   Highly frustrated customers: {high_frustration:,} ({high_frustration/len(self.df)*100:.1f}%)")
+        
+        if high_frustration > 0 and 'is_churn' in self.df.columns:
+            frustrated_churn = self.df[
+                self.df['support_frustration_score'] > 0.65
+            ]['is_churn'].mean() * 100
+            satisfied_churn = self.df[
+                self.df['support_frustration_score'] <= 0.65
+            ]['is_churn'].mean() * 100
+            
+            print(f"   Churn rate (frustrated): {frustrated_churn:.1f}%")
+            print(f"   Churn rate (not frustrated): {satisfied_churn:.1f}%")
+            print(f"   ⚠ Frustration impact: {frustrated_churn/satisfied_churn if satisfied_churn > 0 else 0:.2f}x")
+        
+        print("\n6. STRATEGIC RETENTION OPPORTUNITIES")
+        print("-" * 80)
+        
+        # Engagement reactivation opportunity
+        if no_logins > 0:
+            reactivation_value = no_logins * self.df[self.df['app_login_count_30d'] > 0]['arpu'].mean()
+            print(f"   💡 App reactivation opportunity: {no_logins:,} non-login customers")
+            print(f"      - Potential revenue recovery: ${reactivation_value:,.0f}/month (if app engagement improves)")
+            print(f"      - Action: In-app incentives, simplified UX, push notifications")
+        
+        # Marketing campaign opportunity
+        if offer_ignorers > 0:
+            non_responsive_value = offer_ignorers * self.df['arpu'].mean()
+            print(f"   💡 Marketing re-engagement: {offer_ignorers:,} people ignore campaigns")
+            print(f"      - Monthly revenue at risk: ${non_responsive_value:,.0f}")
+            print(f"      - Action: Personalized offers, timing optimization, multi-channel approach")
+        
+        # Support quality improvement
+        if interaction_without_resolution > 0:
+            support_issue_value = interaction_without_resolution * self.df['arpu'].mean()
+            print(f"   💡 Support quality improvement: {interaction_without_resolution:,} high-interaction/low-resolution cases")
+            print(f"      - Monthly revenue at risk: ${support_issue_value:,.0f}")
+            print(f"      - Action: First-contact resolution training, escalation procedures, proactive follow-up")
+    
     def print_summary(self):
         """Print feature engineering summary"""
         print("\n" + "=" * 80)
@@ -2078,6 +2432,10 @@ class FeatureEngineer:
         print(f"    • Plan type segmentation (2 features)")
         print(f"    • Plan fit score enhancements (6 features)")
         print(f"    • Competitor-attractive categories (7 features)")
+        print(f"  - App/portal engagement, marketing response & service interaction: 23 features")
+        print(f"    • App/portal login frequency & engagement (8 features)")
+        print(f"    • Marketing offer response patterns (7 features)")
+        print(f"    • Service interaction depth & resolution (8 features)")
         print(f"  - Tenure segmentation: 4 features")
         print(f"  - Service quality: 5 features")
         print(f"  - Engagement & loyalty: 5 features")
