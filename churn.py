@@ -1725,6 +1725,188 @@ class FeatureEngineer:
         for feat, desc in list(self.features_created.items())[-23:]:
             print(f"  - {feat}: {desc}")
     
+    def create_arpu_clv_prioritization_features(self):
+        """Create ARPU segmentation and CLV proxy features for retention prioritization"""
+        print("\n" + "=" * 80)
+        print("CREATING ARPU SEGMENTATION & CLV-BASED PRIORITIZATION FEATURES")
+        print("=" * 80)
+        
+        # ===== ARPU SEGMENTATION & VALUE TIERS (10 features) =====
+        # 1. ARPU quartile classification
+        arpu_quartiles = pd.qcut(self.df['arpu'], q=4, labels=['Low', 'Medium', 'High', 'Premium'], duplicates='drop')
+        self.df['arpu_quartile'] = arpu_quartiles.astype(str)
+        self.features_created['arpu_quartile'] = 'ARPU quartile tier (Low/Medium/High/Premium)'
+        
+        # 2. ARPU décile for finer granularity
+        try:
+            arpu_decile = pd.qcut(self.df['arpu'], q=10, labels=False, duplicates='drop')
+            self.df['arpu_decile'] = arpu_decile
+            self.features_created['arpu_decile'] = 'ARPU decile (0-9, 9=highest value)'
+        except:
+            self.df['arpu_decile'] = 0
+            self.features_created['arpu_decile'] = 'ARPU decile (0-9, 9=highest value)'
+        
+        # 3. High-value customer flag (top quartile)
+        arpu_75 = self.df['arpu'].quantile(0.75)
+        self.df['high_value_customer_arpu'] = (self.df['arpu'] >= arpu_75).astype(int)
+        self.features_created['high_value_customer_arpu'] = 'High-value customer (top ARPU quartile)'
+        
+        # 4. Premium value tier (top decile)
+        arpu_90 = self.df['arpu'].quantile(0.90)
+        self.df['premium_value_tier'] = (self.df['arpu'] >= arpu_90).astype(int)
+        self.features_created['premium_value_tier'] = 'Premium value tier (top 10% ARPU)'
+        
+        # 5. ARPU to average ratio (normalized revenue contribution)
+        arpu_mean = self.df['arpu'].mean()
+        self.df['arpu_to_avg_ratio'] = (self.df['arpu'] / (arpu_mean + 1)).clip(0, 5)
+        self.features_created['arpu_to_avg_ratio'] = 'Customer ARPU vs. segment average (capped at 5x)'
+        
+        # 6. Revenue concentration flag (top 20% revenue)
+        cumsum_pct = self.df['arpu'].sort_values(ascending=False).reset_index(drop=True)
+        cumsum_pct = cumsum_pct.cumsum() / cumsum_pct.sum()
+        threshold_arpu = self.df.loc[
+            cumsum_pct[cumsum_pct <= 0.20].index, 'arpu'
+        ].min() if len(cumsum_pct[cumsum_pct <= 0.20]) > 0 else self.df['arpu'].quantile(0.8)
+        self.df['revenue_concentration_flag'] = (self.df['arpu'] >= threshold_arpu).astype(int)
+        self.features_created['revenue_concentration_flag'] = 'Top 20% revenue contributor'
+        
+        # 7. Low-value customer flag (bottom quartile)
+        arpu_25 = self.df['arpu'].quantile(0.25)
+        self.df['low_value_customer_arpu'] = (self.df['arpu'] <= arpu_25).astype(int)
+        self.features_created['low_value_customer_arpu'] = 'Low-value customer (bottom ARPU quartile)'
+        
+        # 8. Value volatility indicator (if multi-service, high variance in component values)
+        self.df['value_volatility_score'] = (
+            (abs(self.df['avg_data_gb_month'] - self.df['avg_data_gb_month'].mean()) / 
+             (self.df['avg_data_gb_month'].std() + 1)) +
+            (abs(self.df['avg_voice_mins_month'] - self.df['avg_voice_mins_month'].mean()) / 
+             (self.df['avg_voice_mins_month'].std() + 1))
+        ) / 2
+        self.df['value_volatility_score'] = self.df['value_volatility_score'].clip(0, 1)
+        self.features_created['value_volatility_score'] = 'Service value volatility score (0-1)'
+        
+        # 9. Value consistency score: ARPU vs. multi-service profile alignment
+        multi_service_value = self.df['is_multi_service'].astype(float) * 0.3
+        self.df['value_consistency_score'] = (
+            1 - (self.df['value_volatility_score'] * 0.5) +
+            (multi_service_value * 0.5)
+        ).clip(0, 1)
+        self.features_created['value_consistency_score'] = 'Value predictability/consistency (0-1)'
+        
+        # 10. Revenue growth potential score (based on current usage vs plan)
+        self.df['revenue_growth_potential'] = (
+            ((self.df['avg_data_gb_month'] / (self.df['avg_data_gb_month'].quantile(0.75) + 1)) * 0.4) +
+            ((self.df['avg_voice_mins_month'] / (self.df['avg_voice_mins_month'].quantile(0.75) + 1)) * 0.3) +
+            ((self.df['monthly_charges'] / (self.df['monthly_charges'].quantile(0.75) + 1)) * 0.3)
+        ).clip(0, 1)
+        self.features_created['revenue_growth_potential'] = 'Upside revenue potential (0-1, usage growth opportunity)'
+        
+        # ===== CLV PROXY & PRIORITIZATION (12 features) =====
+        # 11. Simple CLV: tenure * monthly_charges (proxy for lifetime revenue)
+        self.df['simple_clv'] = self.df['tenure_months'] * self.df['monthly_charges']
+        self.features_created['simple_clv'] = 'Simple CLV = tenure × monthly charges'
+        
+        # 12. Normalized CLV (0-1) for comparison
+        clv_max = self.df['simple_clv'].quantile(0.99)
+        self.df['normalized_clv'] = (self.df['simple_clv'] / clv_max).clip(0, 1)
+        self.features_created['normalized_clv'] = 'CLV normalized 0-1 (vs 99th percentile)'
+        
+        # 13. Actual CLV delivered (accounting for churn likelihood)
+        # Estimate: customers less likely to churn deliver more value
+        if 'is_churn' not in self.df.columns:
+            self.df['actual_clv_estimate'] = self.df['simple_clv']
+        else:
+            # Adjust by implied future lifetime (inverse of churn probability)
+            churn_rate = self.df['is_churn'].mean()
+            self.df['actual_clv_estimate'] = (
+                self.df['simple_clv'] * (1 - (self.df['is_churn'].astype(float) * 0.7))
+            ).clip(0, self.df['simple_clv'].max())
+        self.features_created['actual_clv_estimate'] = 'CLV adjusted for churn risk'
+        
+        # 14. CLV at risk (CLV if customer churns)
+        self.df['clv_at_risk'] = self.df['simple_clv'] - self.df['actual_clv_estimate']
+        self.features_created['clv_at_risk'] = 'Lifetime revenue at risk from churn'
+        
+        # 15. CLV to ARPU ratio (customer stickiness proxy)
+        self.df['clv_to_arpu_ratio'] = (self.df['simple_clv'] / (self.df['arpu'] + 1)).clip(0, 100)
+        self.features_created['clv_to_arpu_ratio'] = 'Customer lifetime vs monthly value ratio'
+        
+        # 16. High CLV + Low CLV churn risk flag
+        clv_75 = self.df['simple_clv'].quantile(0.75)
+        if 'is_churn' in self.df.columns:
+            # This will be compared against actual churn rates in analysis
+            self.df['high_clv_flag'] = (self.df['simple_clv'] >= clv_75).astype(int)
+        else:
+            self.df['high_clv_flag'] = (self.df['simple_clv'] >= clv_75).astype(int)
+        self.features_created['high_clv_flag'] = 'High CLV customer (top quartile lifetime value)'
+        
+        # 17. CLV churn risk priority score (CLV × churn probability)
+        if 'is_churn' in self.df.columns:
+            # Approximate churn probability from payment/complaint indicators
+            churn_indicator = (
+                ((self.df['payment_delinquency_score'] * 0.3) if 'payment_delinquency_score' in self.df.columns else 0) +
+                ((self.df['num_complaints_3m'] / (self.df['num_complaints_3m'].quantile(0.75) + 1)) * 0.3 if 'num_complaints_3m' in self.df.columns else 0) +
+                ((1 - self.df['nps_score'].clip(-100, 100) / 100) * 0.2 if 'nps_score' in self.df.columns else 0) +
+                ((self.df['is_churn'].astype(float)) * 0.2)
+            ).clip(0, 1)
+            self.df['clv_churn_risk_priority'] = (
+                self.df['normalized_clv'] * churn_indicator
+            ).clip(0, 1)
+        else:
+            self.df['clv_churn_risk_priority'] = 0
+        self.features_created['clv_churn_risk_priority'] = 'Priority score for intervention (CLV × churn risk)'
+        
+        # 18. Intervention worthiness score (should we spend resources on this customer?)
+        self.df['intervention_worthiness'] = (
+            (self.df['normalized_clv'] * 0.5) +  # High CLV worth retaining
+            ((1 - self.df['engagement_trend_risk'].astype(float) if 'engagement_trend_risk' in self.df.columns else 0) * 0.2) +  # Engaged easier to retain
+            ((self.df['retention_offer_acceptor'].astype(float) if 'retention_offer_acceptor' in self.df.columns else 0) * 0.15) +  # Responsive to offers
+            ((self.df['loyalty_score'] / 100 if 'loyalty_score' in self.df.columns else 0) * 0.15)  # Loyal customers worth keeping
+        ).clip(0, 1)
+        self.features_created['intervention_worthiness'] = 'Intervention ROI worthiness (0-1)'
+        
+        # 19. VIP retention priority flag (high CLV + churn risk + good engagement)
+        vip_retention_priority = (
+            (self.df['high_clv_flag'] == 1) &  # High CLV
+            ((self.df['clv_churn_risk_priority'] > 0.5) if 'clv_churn_risk_priority' in self.df.columns else False) &  # At risk
+            ((self.df['engagement_trend_risk'] == 0) if 'engagement_trend_risk' in self.df.columns else True)  # But still engaged
+        ).astype(int)
+        self.df['vip_retention_priority'] = vip_retention_priority
+        self.features_created['vip_retention_priority'] = 'VIP retention priority (high CLV at-risk)'
+        
+        # 20. Customer value segment classification
+        self.df['customer_value_segment'] = 'Standard'  # Default
+        high_clv = self.df['simple_clv'] >= clv_75
+        high_arpu = self.df['arpu'] >= arpu_75
+        
+        self.df.loc[high_clv & high_arpu, 'customer_value_segment'] = 'VIP'
+        self.df.loc[high_clv & ~high_arpu, 'customer_value_segment'] = 'Loyal'
+        self.df.loc[~high_clv & high_arpu, 'customer_value_segment'] = 'Premium'
+        self.df.loc[~high_clv & ~high_arpu, 'customer_value_segment'] = 'Standard'
+        
+        self.features_created['customer_value_segment'] = 'Value segment classification (VIP/Loyal/Premium/Standard)'
+        
+        # 21. Tenure efficiency score (CLV per month of tenure - quality of retention)
+        self.df['tenure_efficiency_score'] = (
+            (self.df['simple_clv'] / (self.df['tenure_months'] + 1)) /
+            (self.df['monthly_charges'].mean() + 1)
+        ).clip(0, 1)
+        self.features_created['tenure_efficiency_score'] = 'Revenue efficiency per tenure month (0-1)'
+        
+        # 22. Churn value impact: if this customer churns, what's the monthly revenue loss
+        self.df['churn_revenue_impact_monthly'] = self.df['monthly_charges']
+        if 'is_churn' in self.df.columns:
+            self.df['potential_churn_loss'] = (
+                self.df['monthly_charges'] * (1 - self.df['is_churn'].astype(float)).astype(int)
+            )
+        else:
+            self.df['potential_churn_loss'] = self.df['monthly_charges']
+        self.features_created['churn_revenue_impact_monthly'] = 'Monthly revenue at loss if churned'
+        
+        print("✓ ARPU segmentation & CLV prioritization features created: 22")
+        for feat, desc in list(self.features_created.items())[-22:]:
+            print(f"  - {feat}: {desc}")
+    
     def analyze_payment_churn_indicators(self):
         """Comprehensive analysis of Bill Shock, Payment Delays, and Outstanding Dues"""
         print("\n" + "=" * 80)
@@ -2073,6 +2255,7 @@ class FeatureEngineer:
         self.create_customer_lifetime_value_features()
         self.create_plan_fit_competitor_features()
         self.create_engagement_marketing_service_features()
+        self.create_arpu_clv_prioritization_features()
         
         # Comprehensive payment analysis
         self.analyze_payment_churn_indicators()
@@ -2088,6 +2271,9 @@ class FeatureEngineer:
         
         # Engagement, marketing response, and service interaction analysis
         self.analyze_engagement_marketing_service()
+        
+        # ARPU segmentation and CLV-based prioritization analysis
+        self.analyze_arpu_clv_prioritization()
         
         self.print_summary()
         return self.df
@@ -2405,6 +2591,186 @@ class FeatureEngineer:
             print(f"      - Monthly revenue at risk: ${support_issue_value:,.0f}")
             print(f"      - Action: First-contact resolution training, escalation procedures, proactive follow-up")
     
+    def analyze_arpu_clv_prioritization(self):
+        """Comprehensive analysis of ARPU segmentation and CLV-based retention prioritization"""
+        print("\n" + "=" * 80)
+        print("ARPU SEGMENTATION & CLV-BASED CUSTOMER PRIORITIZATION ANALYSIS")
+        print("=" * 80)
+        
+        print("\n1. ARPU VALUE TIER DISTRIBUTION - Revenue Contributor Segments")
+        print("-" * 80)
+        for tier in ['Low', 'Medium', 'High', 'Premium']:
+            tier_count = (self.df['arpu_quartile'] == tier).sum()
+            if tier_count > 0:
+                tier_data = self.df[self.df['arpu_quartile'] == tier]
+                avg_arpu = tier_data['arpu'].mean()
+                avg_tenure = tier_data['tenure_months'].mean()
+                print(f"   {tier} tier: {tier_count:,} customers ({tier_count/len(self.df)*100:.1f}%)")
+                print(f"     - Average ARPU: ${avg_arpu:.2f}")
+                print(f"     - Average tenure: {avg_tenure:.1f} months")
+                
+                if 'is_churn' in self.df.columns:
+                    tier_churn = tier_data['is_churn'].mean() * 100
+                    print(f"     - Churn rate: {tier_churn:.1f}%")
+        
+        print("\n2. HIGH-VALUE CUSTOMER PROTECTION - Premium Segment Analysis")
+        print("-" * 80)
+        high_value_count = (self.df['high_value_customer_arpu'] == 1).sum()
+        premium_count = (self.df['premium_value_tier'] == 1).sum()
+        
+        print(f"   High-value customers (top 25% ARPU): {high_value_count:,} ({high_value_count/len(self.df)*100:.1f}%)")
+        print(f"   Premium-tier customers (top 10% ARPU): {premium_count:,} ({premium_count/len(self.df)*100:.1f}%)")
+        
+        if high_value_count > 0:
+            hv_data = self.df[self.df['high_value_customer_arpu'] == 1]
+            avg_hv_arpu = hv_data['arpu'].mean()
+            total_hv_revenue = (hv_data['arpu'].sum())
+            pct_total_revenue = (total_hv_revenue / self.df['arpu'].sum()) * 100
+            
+            print(f"   - Average ARPU (high-value): ${avg_hv_arpu:.2f}")
+            print(f"   - Total monthly revenue (high-value): ${total_hv_revenue:,.0f}")
+            print(f"   - ⚠ % of total company revenue: {pct_total_revenue:.1f}%")
+            
+            if 'is_churn' in self.df.columns:
+                hv_churn = hv_data['is_churn'].mean() * 100
+                standard_churn = self.df[self.df['high_value_customer_arpu'] == 0]['is_churn'].mean() * 100
+                print(f"   - Churn rate (high-value): {hv_churn:.1f}%")
+                print(f"   - Churn rate (standard): {standard_churn:.1f}%")
+                
+                # Revenue loss from high-value churn
+                hv_churned = hv_data[hv_data['is_churn'] == 1]
+                monthly_revenue_loss = hv_churned['monthly_charges'].sum()
+                print(f"   - 🚨 Monthly revenue loss from high-value churn: ${monthly_revenue_loss:,.0f}")
+                print(f"   - Risk multiplier: {hv_churn/standard_churn:.2f}x")
+        
+        print("\n3. REVENUE CONCENTRATION & CUSTOMER LIFETIME VALUE (CLV)")
+        print("-" * 80)
+        avg_clv = self.df['simple_clv'].mean()
+        median_clv = self.df['simple_clv'].median()
+        max_clv = self.df['simple_clv'].max()
+        
+        print(f"   Average CLV (tenure × monthly charges): ${avg_clv:,.0f}")
+        print(f"   Median CLV: ${median_clv:,.0f}")
+        print(f"   Maximum CLV: ${max_clv:,.0f}")
+        print(f"   Total portfolio CLV: ${self.df['simple_clv'].sum():,.0f}")
+        
+        high_clv_count = (self.df['high_clv_flag'] == 1).sum()
+        high_clv_data = self.df[self.df['high_clv_flag'] == 1]
+        high_clv_total = high_clv_data['simple_clv'].sum()
+        pct_clv = (high_clv_total / self.df['simple_clv'].sum()) * 100
+        
+        print(f"\n   High CLV customers (top 25%): {high_clv_count:,} ({high_clv_count/len(self.df)*100:.1f}%)")
+        print(f"   - Total CLV value: ${high_clv_total:,.0f} ({pct_clv:.1f}% of portfolio)")
+        print(f"   - Average CLV per customer: ${high_clv_data['simple_clv'].mean():,.0f}")
+        
+        if 'is_churn' in self.df.columns and high_clv_count > 0:
+            at_risk_clv = high_clv_data[high_clv_data['is_churn'] == 1]
+            total_at_risk = at_risk_clv['simple_clv'].sum()
+            print(f"   - 🚨 CLV at risk (churned high-CLV customers): ${total_at_risk:,.0f}")
+            print(f"   ⚠ CRITICAL: Loss of {len(at_risk_clv)} high-value customer relationships")
+        
+        print("\n4. CUSTOMER VALUE SEGMENTATION - Strategic Prioritization")
+        print("-" * 80)
+        segments = self.df['customer_value_segment'].value_counts()
+        for segment, count in segments.items():
+            pct = (count / len(self.df)) * 100
+            segment_data = self.df[self.df['customer_value_segment'] == segment]
+            avg_arpu = segment_data['arpu'].mean()
+            avg_tenure = segment_data['tenure_months'].mean()
+            
+            print(f"   {segment}: {count:,} customers ({pct:.1f}%)")
+            print(f"     - Avg ARPU: ${avg_arpu:.2f}, Avg tenure: {avg_tenure:.1f} months")
+            
+            if 'is_churn' in self.df.columns:
+                churn_rate = segment_data['is_churn'].mean() * 100
+                revenue = segment_data['monthly_charges'].sum()
+                print(f"     - Churn rate: {churn_rate:.1f}%, Monthly revenue: ${revenue:,.0f}")
+        
+        print("\n5. VIP RETENTION PRIORITIZATION - Intervention Targeting")
+        print("-" * 80)
+        vip_priority = (self.df['vip_retention_priority'] == 1).sum()
+        intervention_worthy = (self.df['intervention_worthiness'] > 0.6).sum()
+        
+        print(f"   VIP retention priority customers: {vip_priority:,} ({vip_priority/len(self.df)*100:.1f}%)")
+        print(f"   High intervention worthiness (score >0.6): {intervention_worthy:,} ({intervention_worthy/len(self.df)*100:.1f}%)")
+        
+        if vip_priority > 0:
+            vip_data = self.df[self.df['vip_retention_priority'] == 1]
+            vip_revenue = vip_data['monthly_charges'].sum()
+            vip_clv = vip_data['simple_clv'].sum()
+            
+            print(f"\n   VIP monthly revenue: ${vip_revenue:,.0f}")
+            print(f"   VIP portfolio CLV: ${vip_clv:,.0f}")
+            
+            if 'is_churn' in self.df.columns:
+                vip_churn = vip_data['is_churn'].mean() * 100
+                lost_vip_revenue = vip_data[vip_data['is_churn']==1]['monthly_charges'].sum()
+                print(f"   Churn rate (VIP priority): {vip_churn:.1f}%")
+                print(f"   🚨 Monthly revenue loss from VIP churn: ${lost_vip_revenue:,.0f}")
+        
+        print("\n6. CLV-CHURN RISK MATRIX - Strategic Intervention Allocation")
+        print("-" * 80)
+        
+        # Create a 2x2 matrix: high/low CLV vs high/low churn risk
+        high_clv_threshold = self.df['simple_clv'].quantile(0.75)
+        high_risk_threshold = 0.5  # From clv_churn_risk_priority score
+        
+        high_clv_high_risk = (
+            (self.df['simple_clv'] >= high_clv_threshold) &
+            ((self.df['clv_churn_risk_priority'] > high_risk_threshold) if 'clv_churn_risk_priority' in self.df.columns else False)
+        ).sum()
+        
+        high_clv_low_risk = (
+            (self.df['simple_clv'] >= high_clv_threshold) &
+            ((self.df['clv_churn_risk_priority'] <= high_risk_threshold) if 'clv_churn_risk_priority' in self.df.columns else True)
+        ).sum()
+        
+        low_clv_high_risk = (
+            (self.df['simple_clv'] < high_clv_threshold) &
+            ((self.df['clv_churn_risk_priority'] > high_risk_threshold) if 'clv_churn_risk_priority' in self.df.columns else False)
+        ).sum()
+        
+        low_clv_low_risk = (
+            (self.df['simple_clv'] < high_clv_threshold) &
+            ((self.df['clv_churn_risk_priority'] <= high_risk_threshold) if 'clv_churn_risk_priority' in self.df.columns else True)
+        ).sum()
+        
+        print(f"   HIGH CLV + HIGH RISK (URGENT): {high_clv_high_risk:,} customers")
+        print(f"   💡 Action: Immediate VIP retention outreach, executive engagement")
+        if high_clv_high_risk > 0 and 'simple_clv' in self.df.columns:
+            urgent_clv = self.df[
+                (self.df['simple_clv'] >= high_clv_threshold) &
+                ((self.df['clv_churn_risk_priority'] > high_risk_threshold) if 'clv_churn_risk_priority' in self.df.columns else False)
+            ]['simple_clv'].sum()
+            print(f"   - Portfolio CLV at stake: ${urgent_clv:,.0f}")
+        
+        print(f"\n   HIGH CLV + LOW RISK (RETAIN): {high_clv_low_risk:,} customers")
+        print(f"   💡 Action: Loyalty programs, cross-sell/upsell opportunities")
+        
+        print(f"\n   LOW CLV + HIGH RISK (OPTIMIZE): {low_clv_high_risk:,} customers")
+        print(f"   💡 Action: Cost-efficient retention or accept churn")
+        
+        print(f"\n   LOW CLV + LOW RISK (STANDARD): {low_clv_low_risk:,} customers")
+        print(f"   💡 Action: Monitor, standard marketing campaigns")
+        
+        print("\n7. REVENUE GROWTH & EXPANSION OPPORTUNITIES")
+        print("-" * 80)
+        high_growth_potential = (self.df['revenue_growth_potential'] > 0.6).sum()
+        avg_growth_score = self.df['revenue_growth_potential'].mean()
+        
+        print(f"   Customers with high growth potential (>0.6): {high_growth_potential:,} ({high_growth_potential/len(self.df)*100:.1f}%)")
+        print(f"   Average growth potential score: {avg_growth_score:.2f}/1.0")
+        
+        if high_growth_potential > 0:
+            growth_data = self.df[self.df['revenue_growth_potential'] > 0.6]
+            current_revenue = growth_data['monthly_charges'].sum()
+            max_revenue = (growth_data['monthly_charges'] * 1.25).sum()  # Assume 25% upside
+            upside = max_revenue - current_revenue
+            
+            print(f"   - Current monthly revenue (growth-potential customers): ${current_revenue:,.0f}")
+            print(f"   - Potential revenue with optimization: ${max_revenue:,.0f}")
+            print(f"   💡 Revenue expansion opportunity: ${upside:,.0f}/month")
+    
     def print_summary(self):
         """Print feature engineering summary"""
         print("\n" + "=" * 80)
@@ -2436,6 +2802,9 @@ class FeatureEngineer:
         print(f"    • App/portal login frequency & engagement (8 features)")
         print(f"    • Marketing offer response patterns (7 features)")
         print(f"    • Service interaction depth & resolution (8 features)")
+        print(f"  - ARPU segmentation & CLV-based prioritization: 22 features")
+        print(f"    • ARPU value tier segmentation (10 features)")
+        print(f"    • CLV proxy & prioritization scoring (12 features)")
         print(f"  - Tenure segmentation: 4 features")
         print(f"  - Service quality: 5 features")
         print(f"  - Engagement & loyalty: 5 features")
