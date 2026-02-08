@@ -998,6 +998,144 @@ class FeatureEngineer:
         for feat, desc in list(self.features_created.items())[-5:]:
             print(f"  - {feat}: {desc}")
     
+    def create_advanced_complaint_quality_features(self):
+        """Create advanced complaint frequency, resolution time, and network quality features"""
+        print("\n" + "=" * 80)
+        print("CREATING ADVANCED COMPLAINT, RESOLUTION & NETWORK QUALITY FEATURES")
+        print("=" * 80)
+        
+        # ===== COMPLAINT FREQUENCY ENHANCEMENTS =====
+        
+        # 1. Complaint trend (Recent vs Historical)
+        # If recent complaints > historical average, customer has escalating issues
+        self.df['complaint_trend'] = (
+            self.df['num_complaints_3m'] / (self.df['num_complaints_12m'] / 4 + 0.1)
+        ).clip(0, 5)
+        self.features_created['complaint_trend'] = 'Complaint trend multiplier (escalation indicator)'
+        
+        # 2. Complaint intensity (absolute count normalized)
+        self.df['complaint_intensity_score'] = (
+            self.df['num_complaints_12m'] / (self.df['num_complaints_12m'].max() + 1)
+        )
+        self.features_created['complaint_intensity_score'] = 'Complaint intensity percentile (0-1)'
+        
+        # 3. Complaint frequency category
+        self.df['complaint_frequency_category'] = pd.cut(
+            self.df['num_complaints_12m'],
+            bins=[0, 1, 3, 5, 100],
+            labels=['None', 'Occasional', 'Frequent', 'Chronic']
+        )
+        self.features_created['complaint_frequency_category'] = 'Complaint frequency category'
+        
+        # 4. Customer support fatigue indicator
+        # High complaints + high care interactions = worn-down customer
+        self.df['support_fatigue_indicator'] = (
+            ((self.df['num_complaints_12m'] > self.df['num_complaints_12m'].quantile(0.5)).astype(int) * 0.5) +
+            ((self.df['call_center_interactions_3m'] > self.df['call_center_interactions_3m'].quantile(0.75)).astype(int) * 0.5)
+        )
+        self.features_created['support_fatigue_indicator'] = 'Customer support fatigue flag (high complaints + care)'
+        
+        # ===== ISSUE RESOLUTION TIME ENHANCEMENTS =====
+        
+        # 5. Resolution time severity (inverse quality metric)
+        # Longer resolution times = lower trust
+        self.df['resolution_time_severity'] = (
+            self.df['last_complaint_resolution_days'] / (self.df['last_complaint_resolution_days'].max() + 1)
+        )
+        self.features_created['resolution_time_severity'] = 'Resolution time severity (0-1, higher=slower)'
+        
+        # 6. Unresolved issue indicator (slow resolution = growing frustration)
+        # If last resolution took > 7 days AND customer has multiple complaints
+        self.df['slow_resolution_flag'] = (
+            (self.df['last_complaint_resolution_days'] > 7) & 
+            (self.df['num_complaints_12m'] > self.df['num_complaints_12m'].quantile(0.5))
+        ).astype(int)
+        self.features_created['slow_resolution_flag'] = 'Slow issue resolution with recurring complaints flag'
+        
+        # 7. Resolution time trust erosion score
+        # Combines resolution time with complaint count (multiple unresolved = erosion)
+        self.df['resolution_trust_erosion'] = (
+            (self.df['resolution_time_severity'] * 0.6) +
+            ((self.df['num_complaints_12m'] / self.df['num_complaints_12m'].max()) * 0.4)
+        ).clip(0, 1)
+        self.features_created['resolution_trust_erosion'] = 'Trust erosion from resolution time & freq'
+        
+        # 8. Multiple unresolved issues (recent + slow resolution)
+        self.df['multiple_unresolved_issues'] = (
+            (self.df['num_complaints_3m'] > 0) & 
+            (self.df['last_complaint_resolution_days'] > self.df['last_complaint_resolution_days'].quantile(0.5))
+        ).astype(int)
+        self.features_created['multiple_unresolved_issues'] = 'Multiple ongoing unresolved issues flag'
+        
+        # ===== NETWORK QUALITY INDICATORS =====
+        
+        # 9. Network quality composite score (0-1)
+        # Combines dropped call rate, data speed quality, and network issues
+        dropped_call_score = (1 - self.df['dropped_call_rate']).clip(0, 1)
+        speed_quality = (self.df['avg_data_speed_mbps'] / self.df['avg_data_speed_mbps'].quantile(0.75)).clip(0, 1)
+        network_stability = (1 / (1 + self.df['network_issues_3m'] / 5)).clip(0, 1)
+        
+        self.df['network_quality_index'] = (
+            (dropped_call_score * 0.4) +
+            (speed_quality * 0.35) +
+            (network_stability * 0.25)
+        )
+        self.features_created['network_quality_index'] = 'Overall network quality index (0-1)'
+        
+        # 10. Network degradation indicator
+        # Below median quality = poor experience
+        network_quality_median = self.df['network_quality_index'].median()
+        self.df['poor_network_quality'] = (
+            self.df['network_quality_index'] < network_quality_median
+        ).astype(int)
+        self.features_created['poor_network_quality'] = 'Poor network quality flag (below median)'
+        
+        # 11. Dropped call problem indicator
+        # High dropped call rate = switching trigger
+        dropped_call_threshold = self.df['dropped_call_rate'].quantile(0.75)
+        self.df['dropped_call_problem'] = (
+            self.df['dropped_call_rate'] > dropped_call_threshold
+        ).astype(int)
+        self.features_created['dropped_call_problem'] = 'High dropped call rate problem indicator'
+        
+        # 12. Low data speed indicator
+        # Speeds > 2 standard deviations below mean = poor experience
+        speed_mean = self.df['avg_data_speed_mbps'].mean()
+        speed_std = self.df['avg_data_speed_mbps'].std()
+        speed_threshold = speed_mean - (2 * speed_std)
+        self.df['low_data_speed'] = (
+            self.df['avg_data_speed_mbps'] < speed_threshold
+        ).astype(int)
+        self.features_created['low_data_speed'] = 'Low data speed problem indicator'
+        
+        # 13. Network outage history indicator
+        # Multiple network issues = outage/service disruption history
+        self.df['network_outage_history'] = (
+            self.df['network_issues_3m'] > self.df['network_issues_3m'].quantile(0.75)
+        ).astype(int)
+        self.features_created['network_outage_history'] = 'Frequent network issues/outage history'
+        
+        # 14. Multi-factor network stress indicator
+        # Customer experiencing MULTIPLE network problems simultaneously
+        self.df['network_stress_multi_factor'] = (
+            (self.df['dropped_call_problem'] * 0.4) +
+            (self.df['low_data_speed'] * 0.35) +
+            (self.df['network_outage_history'] * 0.25)
+        ).clip(0, 1)
+        self.features_created['network_stress_multi_factor'] = 'Multi-factor network stress score (0-1)'
+        
+        # 15. Network quality satisfaction expectation gap
+        # Good ARPU but poor network quality = high churn risk
+        self.df['network_quality_value_gap'] = (
+            ((self.df['arpu'] / self.df['arpu'].quantile(0.75)).clip(0, 1) * 
+             (1 - self.df['network_quality_index']))
+        )
+        self.features_created['network_quality_value_gap'] = 'Quality-value gap (paying well but poor service)'
+        
+        print("✓ Advanced complaint, resolution & network quality features created: 15")
+        for feat, desc in list(self.features_created.items())[-15:]:
+            print(f"  - {feat}: {desc}")
+    
     def create_loyalty_tier_features(self):
         """Create loyalty tier and reward eligibility features"""
         print("\n" + "=" * 80)
@@ -1472,6 +1610,140 @@ class FeatureEngineer:
             print(f"   Churn rate (low redemption): {low_redeem_churn:.1f}%")
             print(f"   ✓ Engagement protection factor: {low_redeem_churn/high_redeem_churn:.2f}x")
     
+    def analyze_complaint_resolution_network(self):
+        """Comprehensive analysis of complaint frequency, resolution time, and network quality"""
+        print("\n" + "=" * 80)
+        print("COMPLAINT FREQUENCY, RESOLUTION TIME & NETWORK QUALITY ANALYSIS")
+        print("=" * 80)
+        
+        print("\n1. COMPLAINT FREQUENCY ANALYSIS - Churn Correlation")
+        print("-" * 80)
+        
+        # Overall complaint statistics
+        print(f"   Customers with complaints (12m): {(self.df['num_complaints_12m']>0).sum():,}")
+        print(f"   Average complaints per customer (12m): {self.df['num_complaints_12m'].mean():.2f}")
+        print(f"   Average complaints per customer (3m): {self.df['num_complaints_3m'].mean():.2f}")
+        
+        # Complaint frequency categories
+        for cat in ['None', 'Occasional', 'Frequent', 'Chronic']:
+            cat_count = (self.df['complaint_frequency_category'] == cat).sum()
+            cat_pct = (cat_count / len(self.df)) * 100
+            if cat_count > 0:
+                avg_complaints = self.df[self.df['complaint_frequency_category']==cat]['num_complaints_12m'].mean()
+                if 'is_churn' in self.df.columns:
+                    churn_rate = self.df[self.df['complaint_frequency_category']==cat]['is_churn'].mean() * 100
+                    print(f"   {cat}: {cat_count:,} ({cat_pct:.1f}%), avg: {avg_complaints:.1f} complaints, churn: {churn_rate:.1f}%")
+        
+        # Complaint trend analysis
+        print(f"\n   Complaint trend insight:")
+        escalating = (self.df['complaint_trend'] > 1.5).sum()
+        print(f"   - Escalating complaints: {escalating:,} customers ({escalating/len(self.df)*100:.1f}%)")
+        if escalating > 0 and 'is_churn' in self.df.columns:
+            escalating_churn = self.df[self.df['complaint_trend']>1.5]['is_churn'].mean() * 100
+            print(f"   - Churn rate (escalating): {escalating_churn:.1f}%")
+        
+        # Support fatigue
+        support_fatigued = (self.df['support_fatigue_indicator'] > 0).sum()
+        print(f"\n   Support-fatigued customers: {support_fatigued:,} ({support_fatigued/len(self.df)*100:.1f}%)")
+        if support_fatigued > 0 and 'is_churn' in self.df.columns:
+            fatigue_churn = self.df[self.df['support_fatigue_indicator']>0]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (fatigued): {fatigue_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {fatigue_churn/baseline_churn:.2f}x")
+        
+        print("\n2. ISSUE RESOLUTION TIME ANALYSIS - Trust Erosion")
+        print("-" * 80)
+        
+        # Resolution time statistics
+        print(f"   Average resolution time: {self.df['last_complaint_resolution_days'].mean():.1f} days")
+        print(f"   Median resolution time: {self.df['last_complaint_resolution_days'].median():.1f} days")
+        print(f"   Max resolution time: {self.df['last_complaint_resolution_days'].max():.1f} days")
+        
+        # Slow resolution
+        slow_resolution = (self.df['slow_resolution_flag'] == 1).sum()
+        print(f"\n   Slow resolution (>7 days + recurring complaints): {slow_resolution:,} ({slow_resolution/len(self.df)*100:.1f}%)")
+        if slow_resolution > 0 and 'is_churn' in self.df.columns:
+            slow_churn = self.df[self.df['slow_resolution_flag']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (slow resolution): {slow_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {slow_churn/baseline_churn:.2f}x")
+        
+        # Multiple unresolved issues
+        multiple_unresolved = (self.df['multiple_unresolved_issues'] == 1).sum()
+        print(f"\n   Multiple unresolved issues: {multiple_unresolved:,} ({multiple_unresolved/len(self.df)*100:.1f}%)")
+        if multiple_unresolved > 0 and 'is_churn' in self.df.columns:
+            unresolved_churn = self.df[self.df['multiple_unresolved_issues']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (multiple unresolved): {unresolved_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {unresolved_churn/baseline_churn:.2f}x")
+        
+        print("\n3. NETWORK QUALITY INDICATORS - Switching Triggers")
+        print("-" * 80)
+        
+        # Network quality index
+        print(f"   Average network quality index: {self.df['network_quality_index'].mean():.2f}/1.0")
+        print(f"   Median network quality: {self.df['network_quality_index'].median():.2f}/1.0")
+        
+        # Poor network quality
+        poor_network = (self.df['poor_network_quality'] == 1).sum()
+        print(f"\n   Poor network quality customers: {poor_network:,} ({poor_network/len(self.df)*100:.1f}%)")
+        if poor_network > 0 and 'is_churn' in self.df.columns:
+            poor_network_churn = self.df[self.df['poor_network_quality']==1]['is_churn'].mean() * 100
+            good_network_churn = self.df[self.df['poor_network_quality']==0]['is_churn'].mean() * 100
+            print(f"   - Churn rate (poor network): {poor_network_churn:.1f}%")
+            print(f"   - Churn rate (good network): {good_network_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {poor_network_churn/good_network_churn:.2f}x")
+        
+        # Dropped calls
+        dropped_calls = (self.df['dropped_call_problem'] == 1).sum()
+        print(f"\n   Dropped call problems: {dropped_calls:,} ({dropped_calls/len(self.df)*100:.1f}%)")
+        if dropped_calls > 0 and 'is_churn' in self.df.columns:
+            dropped_churn = self.df[self.df['dropped_call_problem']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (with dropped calls): {dropped_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {dropped_churn/baseline_churn:.2f}x")
+        
+        # Low data speeds
+        low_speeds = (self.df['low_data_speed'] == 1).sum()
+        print(f"\n   Low data speed problems: {low_speeds:,} ({low_speeds/len(self.df)*100:.1f}%)")
+        if low_speeds > 0 and 'is_churn' in self.df.columns:
+            speed_churn = self.df[self.df['low_data_speed']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (low speeds): {speed_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {speed_churn/baseline_churn:.2f}x")
+        
+        # Network outage history
+        outages = (self.df['network_outage_history'] == 1).sum()
+        print(f"\n   Network outage history: {outages:,} ({outages/len(self.df)*100:.1f}%)")
+        if outages > 0 and 'is_churn' in self.df.columns:
+            outage_churn = self.df[self.df['network_outage_history']==1]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (outage history): {outage_churn:.1f}%")
+            print(f"   ⚠ Risk multiplier: {outage_churn/baseline_churn:.2f}x")
+        
+        # Multi-factor stress
+        print(f"\n4. MULTI-FACTOR NETWORK STRESS - Combined Risk")
+        print("-" * 80)
+        high_stress = (self.df['network_stress_multi_factor'] > 0.6).sum()
+        print(f"   High network stress (multiple issues): {high_stress:,} ({high_stress/len(self.df)*100:.1f}%)")
+        if high_stress > 0 and 'is_churn' in self.df.columns:
+            stress_churn = self.df[self.df['network_stress_multi_factor']>0.6]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (multi-factor stress): {stress_churn:.1f}%")
+            print(f"   ⚠ Critical risk multiplier: {stress_churn/baseline_churn:.2f}x")
+        
+        # Quality-value gap
+        print(f"\n5. QUALITY-VALUE GAP - High Payers with Poor Service")
+        print("-" * 80)
+        gap_customers = (self.df['network_quality_value_gap'] > 0.5).sum()
+        print(f"   High-ARPU customers with poor network: {gap_customers:,} ({gap_customers/len(self.df)*100:.1f}%)")
+        if gap_customers > 0 and 'is_churn' in self.df.columns:
+            gap_churn = self.df[self.df['network_quality_value_gap']>0.5]['is_churn'].mean() * 100
+            baseline_churn = self.df['is_churn'].mean() * 100
+            print(f"   - Churn rate (quality-value gap): {gap_churn:.1f}%")
+            print(f"   ⚠ Revenue loss risk multiplier: {gap_churn/baseline_churn:.2f}x")
+            print(f"   💡 High-priority retention segment")
+    
     def run_feature_engineering(self):
         """Execute complete feature engineering pipeline"""
         print("\n" + "#" * 80)
@@ -1485,6 +1757,7 @@ class FeatureEngineer:
         self.create_complaint_features()
         self.create_tenure_features()
         self.create_service_quality_features()
+        self.create_advanced_complaint_quality_features()
         self.create_engagement_features()
         self.create_bill_shock_features()
         self.create_churn_risk_score()
@@ -1497,6 +1770,9 @@ class FeatureEngineer:
         
         # Loyalty and retention analysis
         self.analyze_loyalty_and_retention()
+        
+        # Complaint, resolution, and network quality analysis
+        self.analyze_complaint_resolution_network()
         
         self.print_summary()
         return self.df
@@ -1520,6 +1796,10 @@ class FeatureEngineer:
         print(f"    • Payment delinquency & collection risk")
         print(f"    • Chronic payment issues tracking")
         print(f"  - Complaints & satisfaction: 6 features")
+        print(f"  - Advanced complaint, resolution & network quality: 15 features")
+        print(f"    • Complaint frequency enhancements (4 features)")
+        print(f"    • Issue resolution time analysis (4 features)")
+        print(f"    • Network quality indicators (7 features)")
         print(f"  - Tenure segmentation: 4 features")
         print(f"  - Service quality: 5 features")
         print(f"  - Engagement & loyalty: 5 features")
