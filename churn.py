@@ -998,6 +998,106 @@ class FeatureEngineer:
         for feat, desc in list(self.features_created.items())[-5:]:
             print(f"  - {feat}: {desc}")
     
+    def create_loyalty_tier_features(self):
+        """Create loyalty tier and reward eligibility features"""
+        print("\n" + "=" * 80)
+        print("CREATING LOYALTY TIER & REWARD ELIGIBILITY FEATURES")
+        print("=" * 80)
+        
+        # Loyalty tier based on: tenure, revenue, engagement, service quality, payment behavior
+        # Tier calculation
+        tenure_score = (self.df['tenure_months'] / self.df['tenure_months'].max()).clip(0, 1)
+        revenue_score = (self.df['arpu'] / self.df['arpu'].quantile(0.75)).clip(0, 1)
+        engagement_score = self.df['digital_engagement_score'].clip(0, 1)
+        service_score = self.df['service_quality_composite'].clip(0, 1)
+        payment_score = (1 - self.df['payment_delinquency_score']).clip(0, 1)
+        
+        # Composite loyalty score
+        loyalty_score = (
+            (tenure_score * 0.25) +
+            (revenue_score * 0.25) +
+            (engagement_score * 0.15) +
+            (service_score * 0.20) +
+            (payment_score * 0.15)
+        )
+        
+        # Loyalty tier classification
+        self.df['loyalty_tier'] = pd.cut(
+            loyalty_score,
+            bins=[0, 0.25, 0.5, 0.75, 1.0],
+            labels=['Bronze', 'Silver', 'Gold', 'Platinum'],
+            duplicates='drop'
+        )
+        self.features_created['loyalty_tier'] = 'Customer loyalty tier classification'
+        
+        # Tier numeric score (0-100)
+        self.df['loyalty_score'] = loyalty_score * 100
+        self.features_created['loyalty_score'] = 'Loyalty score metric (0-100)'
+        
+        # Reward eligibility tiers
+        # Bronze: Basic benefits (entry level)
+        self.df['reward_tier_bronze'] = (self.df['loyalty_tier'] == 'Bronze').astype(int)
+        self.features_created['reward_tier_bronze'] = 'Eligible for Bronze tier rewards'
+        
+        # Silver: Standard benefits (active users)
+        self.df['reward_tier_silver'] = (
+            (self.df['loyalty_tier'].isin(['Silver', 'Gold', 'Platinum'])) | 
+            (self.df['tenure_months'] >= 6)
+        ).astype(int)
+        self.features_created['reward_tier_silver'] = 'Eligible for Silver tier rewards'
+        
+        # Gold: Premium benefits (high-value, engaged)
+        self.df['reward_tier_gold'] = (
+            (self.df['loyalty_tier'].isin(['Gold', 'Platinum'])) |
+            ((self.df['tenure_months'] >= 12) & (self.df['arpu'] > self.df['arpu'].median()))
+        ).astype(int)
+        self.features_created['reward_tier_gold'] = 'Eligible for Gold tier rewards'
+        
+        # Platinum: Elite benefits (top customers)
+        self.df['reward_tier_platinum'] = (
+            (self.df['loyalty_tier'] == 'Platinum') |
+            ((self.df['tenure_months'] >= 24) & 
+             (self.df['arpu'] > self.df['arpu'].quantile(0.75)) & 
+             (self.df['service_quality_composite'] > 0.75))
+        ).astype(int)
+        self.features_created['reward_tier_platinum'] = 'Eligible for Platinum tier rewards'
+        
+        # Undervalued customer indicator (low tier despite good criteria)
+        self.df['undervalued_customer'] = (
+            ((self.df['loyalty_tier'] == 'Bronze') & (self.df['tenure_months'] >= 12)) |
+            ((self.df['loyalty_tier'] == 'Silver') & (self.df['arpu'] > self.df['arpu'].quantile(0.75)))
+        ).astype(int)
+        self.features_created['undervalued_customer'] = 'Low-tier customer who may feel undervalued'
+        
+        # Reward redemption propensity (based on engagement + tenure)
+        self.df['reward_redemption_propensity'] = (
+            (self.df['engaged_customer'] * 0.5) +
+            ((self.df['tenure_months'] > 6).astype(int) * 0.3) +
+            ((self.df['app_logins_30d'] > self.df['app_logins_30d'].quantile(0.25)).astype(int) * 0.2)
+        )
+        self.features_created['reward_redemption_propensity'] = 'Propensity to redeem rewards (0-1)'
+        
+        # VIP customer flag (highest loyalty potential)
+        self.df['vip_customer'] = (
+            (self.df['loyalty_tier'] == 'Platinum') |
+            ((self.df['tenure_months'] >= 24) & 
+             (self.df['service_quality_composite'] > 0.8) & 
+             (self.df['nps_score'] > 70))
+        ).astype(int)
+        self.features_created['vip_customer'] = 'VIP customer flag (elite loyalty segment)'
+        
+        # Tier downgrade risk (customers who might lose tier status)
+        self.df['tier_downgrade_risk'] = (
+            ((self.df['loyalty_tier'] == 'Platinum') & (self.df['churn_risk_score'] > 50)) |
+            ((self.df['loyalty_tier'] == 'Gold') & (self.df['churn_risk_score'] > 60)) |
+            ((self.df['loyalty_tier'] == 'Silver') & (self.df['churn_risk_score'] > 70))
+        ).astype(int)
+        self.features_created['tier_downgrade_risk'] = 'Risk of losing tier status indicator'
+        
+        print("✓ Loyalty tier & reward eligibility features created: 11")
+        for feat, desc in list(self.features_created.items())[-11:]:
+            print(f"  - {feat}: {desc}")
+    
     def create_bill_shock_features(self):
         """Create bill shock and unexpected charge indicators"""
         print("\n" + "=" * 80)
@@ -1271,6 +1371,107 @@ class FeatureEngineer:
         if len(high_risk_payment) > 0 and 'is_churn' in self.df.columns:
             print(f"     Churn rate (triple risk): {high_risk_payment['is_churn'].mean()*100:.1f}%")
     
+    def analyze_loyalty_and_retention(self):
+        """Comprehensive analysis of loyalty tiers and retention indicators"""
+        print("\n" + "=" * 80)
+        print("LOYALTY TIER & RETENTION ANALYSIS")
+        print("=" * 80)
+        
+        print("\n1. LOYALTY TIER DISTRIBUTION & CUSTOMER SEGMENTATION")
+        print("-" * 80)
+        for tier in ['Bronze', 'Silver', 'Gold', 'Platinum']:
+            tier_count = (self.df['loyalty_tier'] == tier).sum()
+            tier_pct = (tier_count / len(self.df)) * 100
+            avg_loyalty = self.df[self.df['loyalty_tier'] == tier]['loyalty_score'].mean()
+            print(f"   {tier}: {tier_count:,} customers ({tier_pct:.1f}%), avg loyalty score: {avg_loyalty:.1f}")
+        
+        print("\n2. TENURE BUCKET ANALYSIS - Price Sensitivity & Churn Patterns")
+        print("-" * 80)
+        for tenure_cat in self.df['tenure_category'].unique():
+            if pd.isna(tenure_cat):
+                continue
+            cat_data = self.df[self.df['tenure_category'] == tenure_cat]
+            count = len(cat_data)
+            pct = (count / len(self.df)) * 100
+            avg_tenure = cat_data['tenure_months'].mean()
+            price_sensitivity = (
+                (cat_data['price_sensitivity_indicator'].mean() if 'price_sensitivity_indicator' in self.df.columns else 0.5) * 100
+            )
+            if 'is_churn' in self.df.columns:
+                churn_rate = cat_data['is_churn'].mean() * 100
+                print(f"   {tenure_cat}: {count:,} customers ({pct:.1f}%)")
+                print(f"     - Avg tenure: {avg_tenure:.1f} months")
+                print(f"     - Churn rate: {churn_rate:.1f}%")
+                print(f"     - Price sensitivity: {price_sensitivity:.1f}%")
+        
+        print("\n3. REWARD ELIGIBILITY & VIP SEGMENTATION")
+        print("-" * 80)
+        bronze_reward = (self.df['reward_tier_bronze'] == 1).sum()
+        silver_reward = (self.df['reward_tier_silver'] == 1).sum()
+        gold_reward = (self.df['reward_tier_gold'] == 1).sum()
+        platinum_reward = (self.df['reward_tier_platinum'] == 1).sum()
+        
+        print(f"   Bronze reward eligible: {bronze_reward:,} ({bronze_reward/len(self.df)*100:.1f}%)")
+        print(f"   Silver reward eligible: {silver_reward:,} ({silver_reward/len(self.df)*100:.1f}%)")
+        print(f"   Gold reward eligible: {gold_reward:,} ({gold_reward/len(self.df)*100:.1f}%)")
+        print(f"   Platinum reward eligible: {platinum_reward:,} ({platinum_reward/len(self.df)*100:.1f}%)")
+        
+        vip_count = (self.df['vip_customer'] == 1).sum()
+        print(f"\n   VIP customers (elite segment): {vip_count:,} ({vip_count/len(self.df)*100:.1f}%)")
+        if vip_count > 0 and 'is_churn' in self.df.columns:
+            vip_churn = self.df[self.df['vip_customer']==1]['is_churn'].mean() * 100
+            standard_churn = self.df[self.df['vip_customer']==0]['is_churn'].mean() * 100
+            print(f"   VIP churn rate: {vip_churn:.1f}%")
+            print(f"   Non-VIP churn rate: {standard_churn:.1f}%")
+            print(f"   ⚠ Protection factor: {standard_churn/vip_churn:.2f}x")
+        
+        print("\n4. UNDERVALUED CUSTOMER ANALYSIS - Churn Risk & Retention Opportunity")
+        print("-" * 80)
+        undervalued = (self.df['undervalued_customer'] == 1).sum()
+        print(f"   Undervalued customers: {undervalued:,} ({undervalued/len(self.df)*100:.1f}%)")
+        
+        if undervalued > 0:
+            underval_data = self.df[self.df['undervalued_customer'] == 1]
+            avg_tenure = underval_data['tenure_months'].mean()
+            avg_arpu = underval_data['arpu'].mean()
+            print(f"   - Average tenure: {avg_tenure:.1f} months (high loyalty)")
+            print(f"   - Average ARPU: ${avg_arpu:.2f} (high value)")
+            
+            if 'is_churn' in self.df.columns:
+                underval_churn = underval_data['is_churn'].mean() * 100
+                overall_churn = self.df['is_churn'].mean() * 100
+                print(f"   - Churn rate: {underval_churn:.1f}%")
+                print(f"   ⚠ Risk multiplier vs average: {underval_churn/overall_churn:.2f}x")
+                print(f"   💡 Opportunity: Upgrade {undervalued:,} customers to higher tier")
+                print(f"      Potential revenue impact: ${undervalued * (avg_arpu * 0.15):.0f} (15% ARPU increase)")
+        
+        print("\n5. TIER DOWNGRADE RISK - At-Risk High-Tier Customers")
+        print("-" * 80)
+        downgrade_risk = (self.df['tier_downgrade_risk'] == 1).sum()
+        print(f"   Customers at tier downgrade risk: {downgrade_risk:,} ({downgrade_risk/len(self.df)*100:.1f}%)")
+        
+        if downgrade_risk > 0:
+            plat_risk = self.df[(self.df['loyalty_tier']=='Platinum') & (self.df['tier_downgrade_risk']==1)]
+            gold_risk = self.df[(self.df['loyalty_tier']=='Gold') & (self.df['tier_downgrade_risk']==1)]
+            silver_risk = self.df[(self.df['loyalty_tier']=='Silver') & (self.df['tier_downgrade_risk']==1)]
+            
+            print(f"   - Platinum tier at risk: {len(plat_risk):,} (high revenue loss probability)")
+            print(f"   - Gold tier at risk: {len(gold_risk):,}")
+            print(f"   - Silver tier at risk: {len(silver_risk):,}")
+        
+        print("\n6. REWARD REDEMPTION & ENGAGEMENT PROPENSITY")
+        print("-" * 80)
+        high_redemption = (self.df['reward_redemption_propensity'] > 0.6).sum()
+        print(f"   High reward redemption propensity: {high_redemption:,} ({high_redemption/len(self.df)*100:.1f}%)")
+        print(f"   Average redemption propensity: {self.df['reward_redemption_propensity'].mean():.2f}")
+        
+        if 'is_churn' in self.df.columns:
+            high_redeem_churn = self.df[self.df['reward_redemption_propensity']>0.6]['is_churn'].mean() * 100
+            low_redeem_churn = self.df[self.df['reward_redemption_propensity']<=0.6]['is_churn'].mean() * 100
+            print(f"   Churn rate (high redemption): {high_redeem_churn:.1f}%")
+            print(f"   Churn rate (low redemption): {low_redeem_churn:.1f}%")
+            print(f"   ✓ Engagement protection factor: {low_redeem_churn/high_redeem_churn:.2f}x")
+    
     def run_feature_engineering(self):
         """Execute complete feature engineering pipeline"""
         print("\n" + "#" * 80)
@@ -1287,11 +1488,15 @@ class FeatureEngineer:
         self.create_engagement_features()
         self.create_bill_shock_features()
         self.create_churn_risk_score()
+        self.create_loyalty_tier_features()
         self.create_segmentation_features()
         self.create_customer_lifetime_value_features()
         
         # Comprehensive payment analysis
         self.analyze_payment_churn_indicators()
+        
+        # Loyalty and retention analysis
+        self.analyze_loyalty_and_retention()
         
         self.print_summary()
         return self.df
@@ -1318,6 +1523,11 @@ class FeatureEngineer:
         print(f"  - Tenure segmentation: 4 features")
         print(f"  - Service quality: 5 features")
         print(f"  - Engagement & loyalty: 5 features")
+        print(f"  - Loyalty tier & reward eligibility: 11 features")
+        print(f"    • Loyalty tier classification (Bronze/Silver/Gold/Platinum)")
+        print(f"    • Reward tier eligibility & VIP status")
+        print(f"    • Undervalued customer indicators")
+        print(f"    • Tier downgrade risk tracking")
         print(f"  - Bill shock indicators: 4 features")
         print(f"  - Churn risk assessment: 4 features")
         print(f"  - Segmentation & value: 5 features")
