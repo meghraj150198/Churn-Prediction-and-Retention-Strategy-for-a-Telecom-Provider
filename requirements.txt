@@ -1,0 +1,22 @@
+# Churn Prediction System - Requirements
+# Python 3.12+
+
+# Data Processing & Analysis
+pandas==3.0.0
+numpy==2.4.2
+scipy==1.17.0
+
+# Machine Learning Models
+scikit-learn==1.8.0
+xgboost==3.1.3
+lightgbm==4.6.0
+joblib==1.5.3
+
+# Web Framework & API
+flask==3.1.2
+flask-cors==6.0.2
+
+# Optional: For advanced features (uncomment if needed)
+# matplotlib==3.8.0  # for plotting
+# seaborn==0.13.0    # for statistical visualization
+# plotly==5.18.0     # for interactive plots

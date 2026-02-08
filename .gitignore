@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data & Logs
+*.log
+*.db
+*.sqlite
+*.sqlite3
+operational_db.sqlite
+ensemble_results.txt
+final_output.txt
+model_output.log
+
+# Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Credentials & Secrets
+.env
+.env.local
+secrets.json
+credentials.json
+config.local.py
+
+# Temporary
+*.tmp
+*.temp
+*.bak
